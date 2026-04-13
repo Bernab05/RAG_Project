@@ -28,8 +28,8 @@ MODEL_NAME      = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 SCORE_THRESHOLD = 0.35
 TOP_K           = 8
 
-# Modele HuggingFace pour le cloud (gratuit, bon en francais)
-HF_MODEL        = "mistralai/Mistral-7B-Instruct-v0.3"
+# Modele HuggingFace pour le cloud (gratuit, non-gated, bon en francais)
+HF_MODEL        = "HuggingFaceH4/zephyr-7b-beta"
 # Modele Ollama pour le local
 OLLAMA_MODEL    = "qwen2.5:3b"
 
@@ -87,22 +87,34 @@ def load_llm():
     else:
         from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
         # La cle HF_TOKEN doit etre dans les secrets Streamlit ou les variables d'env
-        hf_token = os.environ.get("HF_TOKEN") or st.secrets.get("HF_TOKEN", "")
+        hf_token = (
+            os.environ.get("HF_TOKEN")
+            or st.secrets.get("HF_TOKEN", "")
+        )
         if not hf_token:
             st.error(
                 "Cle HuggingFace requise pour le mode cloud.\n\n"
                 "Ajoutez `HF_TOKEN` dans les secrets Streamlit :\n"
-                "`.streamlit/secrets.toml` avec `HF_TOKEN = \"hf_...\"`"
+                "`.streamlit/secrets.toml` avec `HF_TOKEN = \"hf_...\"`\n\n"
+                "Cle gratuite sur : https://huggingface.co/settings/tokens"
             )
             st.stop()
-        endpoint = HuggingFaceEndpoint(
-            repo_id=HF_MODEL,
-            huggingfacehub_api_token=hf_token,
-            temperature=0.1,
-            max_new_tokens=1024,
-        )
-        llm = ChatHuggingFace(llm=endpoint)
-        return llm, f"HuggingFace ({HF_MODEL})"
+        try:
+            endpoint = HuggingFaceEndpoint(
+                repo_id=HF_MODEL,
+                huggingfacehub_api_token=hf_token,
+                temperature=0.1,
+                max_new_tokens=1024,
+            )
+            llm = ChatHuggingFace(llm=endpoint)
+            return llm, f"HuggingFace ({HF_MODEL})"
+        except Exception as e:
+            st.error(
+                f"Erreur de chargement du LLM HuggingFace : {e}\n\n"
+                "Verifiez que votre HF_TOKEN est valide et dispose des permissions 'read'.\n"
+                "Cle gratuite sur : https://huggingface.co/settings/tokens"
+            )
+            st.stop()
 
 # =============================================
 # Fonctions de base
@@ -214,7 +226,28 @@ def call_llm(question: str, context: str, context_label: str = "AI Act") -> str:
         content=f"Contexte ({context_label}) :\n{context}\n\nQuestion : {question}"
     ))
 
-    return llm.invoke(messages).content
+    try:
+        return llm.invoke(messages).content
+    except Exception as e:
+        error_msg = str(e)
+        if "401" in error_msg or "authentication" in error_msg.lower():
+            raise RuntimeError(
+                "Erreur 401 : HF_TOKEN invalide ou expire. "
+                "Regenerez votre token sur https://huggingface.co/settings/tokens"
+            ) from e
+        elif "403" in error_msg or "gated" in error_msg.lower() or "access" in error_msg.lower():
+            raise RuntimeError(
+                f"Erreur 403 : Acces refuse au modele {HF_MODEL}. "
+                "Ce modele est peut-etre 'gated' (acces restreint). "
+                "Acceptez les CGU sur la page HuggingFace du modele."
+            ) from e
+        elif "429" in error_msg or "rate" in error_msg.lower():
+            raise RuntimeError(
+                "Erreur 429 : Limite de requetes HuggingFace atteinte. "
+                "Attendez quelques minutes et reessayez."
+            ) from e
+        else:
+            raise RuntimeError(f"Erreur LLM : {error_msg}") from e
 
 
 def process_question(question: str) -> dict:
@@ -358,7 +391,11 @@ if question := st.chat_input("Posez votre question..."):
 
     with st.chat_message("assistant"):
         with st.spinner("Recherche..."):
-            result = process_question(question)
+            try:
+                result = process_question(question)
+            except RuntimeError as e:
+                st.error(str(e))
+                st.stop()
 
         st.markdown(result["response"])
         st.info(f"Mode : {result['mode']}")
