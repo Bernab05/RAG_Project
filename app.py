@@ -99,9 +99,14 @@ def load_llm():
                 "Cle gratuite sur : https://huggingface.co/settings/tokens"
             )
             st.stop()
+        # IMPORTANT : les nouvelles versions de langchain-huggingface lisent
+        # le token depuis la variable d'environnement, pas depuis le parametre.
+        os.environ["HUGGINGFACEHUB_API_TOKEN"] = hf_token
+        os.environ["HF_TOKEN"] = hf_token
         try:
             endpoint = HuggingFaceEndpoint(
                 repo_id=HF_MODEL,
+                task="text-generation",
                 huggingfacehub_api_token=hf_token,
                 temperature=0.1,
                 max_new_tokens=1024,
