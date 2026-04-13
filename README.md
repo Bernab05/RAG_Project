@@ -2,33 +2,34 @@
 
 Chatbot RAG pour interroger le Reglement europeen sur l'Intelligence Artificielle. Routage deterministe + LLM pour la redaction. Recherche internet automatique via DuckDuckGo si l'information n'est pas dans le AI Act.
 
-Fonctionne en local (Ollama) et sur Streamlit Cloud (HuggingFace Inference API).
+Fonctionne en local (Ollama) et sur Streamlit Cloud (Groq).
 
 ## Stack technique
 
 | Composant | Outil | Detail |
 |---|---|---|
 | Embeddings | `paraphrase-multilingual-mpnet-base-v2` | 278M parametres, 768 dimensions, 50+ langues |
-| Vector store | FAISS | Index persistant, recherche avec seuil de score |
+| Vector store | FAISS | 796 chunks indexes (articles + considerants + annexes) |
 | LLM (local) | Qwen 2.5 3B via Ollama | ~2 Go RAM, detection automatique |
-| LLM (cloud) | Mistral 7B Instruct via HuggingFace | Cle API gratuite (HF_TOKEN) |
+| LLM (cloud) | Llama 3.1 8B Instant via Groq | Cle API gratuite (GROQ_API_KEY) |
 | Recherche web | DuckDuckGo (ddgs) | Fallback quand l'info n'est pas dans le AI Act |
-| Memoire | InMemoryChatMessageHistory | Conditionnelle (activee sur les questions de suivi) |
+| Memoire | InMemoryChatMessageHistory | Systematique (6 derniers messages toujours inclus) |
 | Interface | Streamlit | Chat web avec historique |
 
 ## Structure du projet
 
 ```
 RAG_project/
-├── requirements.txt                      # Dependances Python
-├── chunker.py                            # Parsing structurel du AI Act (641 chunks)
-├── build_index.py                        # Construction de l'index vectoriel FAISS
-├── app.py                                # Application Streamlit (3 modes + memoire)
-├── chatbot_ai_act.ipynb                  # Notebook tout-en-un
-├── L-202401689FR.000101.fmx.xml.md      # Texte source du AI Act (FR)
+├── requirements.txt                              # Dependances Python
+├── chunker.py                                    # Parsing structurel du AI Act (796 chunks)
+├── build_index.py                                # Construction de l'index vectoriel FAISS
+├── app.py                                        # Application Streamlit (3 modes + memoire)
+├── chatbot_ai_act.ipynb                          # Notebook tout-en-un
+├── OJ_L_202401689_FR_TXTavec annexes.md         # Texte source complet (articles + 13 annexes)
+├── faiss_index/                                  # Index FAISS (committe pour Streamlit Cloud)
 ├── .gitignore
 └── .streamlit/
-    └── secrets.toml                      # Cle HF_TOKEN (non committe)
+    └── secrets.toml                              # Cle GROQ_API_KEY (non committe)
 ```
 
 ## Installation locale
@@ -57,11 +58,11 @@ streamlit run app.py
 
 1. Poussez le code sur GitHub (incluant `faiss_index/` dans le repo)
 2. Connectez le repo a Streamlit Cloud
-3. Ajoutez le secret `HF_TOKEN` :
+3. Ajoutez le secret `GROQ_API_KEY` :
    - Dashboard → Settings → Secrets
-   - `HF_TOKEN = "hf_votre_cle_ici"`
-   - Cle gratuite sur : https://huggingface.co/settings/tokens
-4. L'app detecte automatiquement l'absence d'Ollama et bascule sur HuggingFace
+   - `GROQ_API_KEY = "gsk_votre_cle_ici"`
+   - Cle gratuite sur : https://console.groq.com
+4. L'app detecte automatiquement l'absence d'Ollama et bascule sur Groq
 
 ## Detection automatique Local / Cloud
 
@@ -73,20 +74,23 @@ Ollama repond sur localhost:11434 ?
     |
    oui → ChatOllama (Qwen 2.5 3B, local, gratuit)
     |
-   non → ChatHuggingFace (Mistral 7B Instruct, API, gratuit avec HF_TOKEN)
+   non → ChatGroq (Llama 3.1 8B Instant, API Groq, gratuit)
 ```
-
-L'import `langchain-ollama` est fait dynamiquement : il n'est jamais execute sur le cloud, donc pas de `ModuleNotFoundError`.
 
 ## 3 modes automatiques
 
 Le routage est fait par du **code Python** (regex + score FAISS), pas par le LLM.
 
-### Mode DIRECT (0 appel LLM)
+### Mode DIRECT (0 ou 1 appel LLM)
 
 ```
-"Donne-moi l'article 5"       → texte integral (regex + docstore_lookup)
-"Que dit le considerant 12 ?" → texte exact
+"Donne-moi l'article 5"        → texte integral (0 LLM)
+"Articles 5 et 8"              → texte des deux articles (0 LLM)
+"Articles 5 a 8"               → plage d'articles (0 LLM)
+"Considerants 1 et 2"          → texte des deux considerants (0 LLM)
+"Annexe III"                   → texte integral de l'annexe (0 LLM)
+"Resume l'article 5"           → texte passe au LLM pour synthese (1 LLM)
+"Explique le considerant 12"   → texte passe au LLM pour explication (1 LLM)
 ```
 
 ### Mode RAG (1 appel LLM)
@@ -104,10 +108,11 @@ Le routage est fait par du **code Python** (regex + score FAISS), pas par le LLM
 
 ## Memoire conversationnelle
 
-`InMemoryChatMessageHistory` (LangChain natif). Conditionnelle :
+`InMemoryChatMessageHistory` (LangChain natif). Les 6 derniers messages sont **toujours** envoyes au LLM, ce qui permet :
 
-- **Question independante** → pas d'historique (evite la pollution)
-- **Question de suivi** ("resume ci-dessus", "explique", "et pour...") → 3 derniers echanges inclus
+- Questions de suivi : "resume ci-dessus", "et pour les PME ?"
+- References implicites : "comment je m'appelle ?", "sur quel roi ?"
+- Continuite naturelle de conversation
 
 ## Architecture
 
@@ -115,21 +120,33 @@ Le routage est fait par du **code Python** (regex + score FAISS), pas par le LLM
 Question
     |
     v
-Regex article/considerant ?
-   oui → docstore_lookup → texte mot a mot (0 LLM)
+Resume/explication demande ? (regex)
     |
+    v
+Regex article/considerant/annexe ?
+   oui → docstore_lookup → texte mot a mot (0 LLM)
+    |                       ou synthese LLM si resume demande (1 LLM)
    non → FAISS (score > 0.35) ?
-          oui → contexte + [historique si suivi] → LLM (1 appel)
+          oui → contexte + historique → LLM (1 appel)
            |
-          non → DuckDuckGo (FR + EN) → LLM (1 appel)
+          non → DuckDuckGo (FR + EN) + historique → LLM (1 appel)
 ```
+
+## Donnees indexees
+
+| Type | Nombre | Source |
+|---|---|---|
+| Considerants | 236 | (1) a (180+) |
+| Articles | 465 | Article premier a Article 113 (decoupes par paragraphe) |
+| Annexes | 95 | Annexe I a XIII (13 annexes, decoupees par section) |
+| **Total** | **796 chunks** | |
 
 ## Configuration
 
 | Parametre | Defaut | Description |
 |---|---|---|
 | `OLLAMA_MODEL` | `"qwen2.5:3b"` | Modele local (Ollama) |
-| `HF_MODEL` | `"mistralai/Mistral-7B-Instruct-v0.3"` | Modele cloud (HuggingFace) |
+| `GROQ_MODEL` | `"llama-3.1-8b-instant"` | Modele cloud (Groq) |
 | `SCORE_THRESHOLD` | `0.35` | Seuil de pertinence FAISS |
 | `TOP_K` | `8` | Nombre max de documents en mode RAG |
 
