@@ -28,8 +28,8 @@ MODEL_NAME      = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 SCORE_THRESHOLD = 0.35
 TOP_K           = 8
 
-# Modele HuggingFace pour le cloud (gratuit, non-gated, bon en francais)
-HF_MODEL        = "HuggingFaceH4/zephyr-7b-beta"
+# Modele Groq pour le cloud (gratuit, rapide, Llama 3)
+GROQ_MODEL      = "llama-3.1-8b-instant"
 # Modele Ollama pour le local
 OLLAMA_MODEL    = "qwen2.5:3b"
 
@@ -86,22 +86,22 @@ def load_llm():
         client = ChatOllama(model=OLLAMA_MODEL, temperature=0.1)
         return {"type": "ollama", "client": client}, f"Ollama ({OLLAMA_MODEL})"
     else:
-        from huggingface_hub import InferenceClient
-        hf_token = (
-            os.environ.get("HF_TOKEN")
-            or st.secrets.get("HF_TOKEN", "")
+        from langchain_groq import ChatGroq
+        groq_api_key = (
+            os.environ.get("GROQ_API_KEY")
+            or st.secrets.get("GROQ_API_KEY", "")
         )
-        if not hf_token:
+        if not groq_api_key:
             st.error(
-                "Cle HuggingFace requise pour le mode cloud.\n\n"
-                "Ajoutez `HF_TOKEN` dans les secrets Streamlit :\n"
-                "`.streamlit/secrets.toml` avec `HF_TOKEN = \"hf_...\"`\n\n"
-                "Cle gratuite sur : https://huggingface.co/settings/tokens"
+                "Cle Groq requise pour le mode cloud.\n\n"
+                "1. Creez un compte gratuit sur https://console.groq.com\n"
+                "2. Generez une cle API\n"
+                "3. Ajoutez dans Streamlit Cloud → Settings → Secrets :\n"
+                "   `GROQ_API_KEY = \"gsk_...\"`"
             )
             st.stop()
-        # InferenceClient : API native huggingface_hub, sans wrapper LangChain
-        client = InferenceClient(model=HF_MODEL, token=hf_token)
-        return {"type": "hf", "client": client}, f"HuggingFace ({HF_MODEL})"
+        client = ChatGroq(model=GROQ_MODEL, api_key=groq_api_key, temperature=0.1)
+        return {"type": "groq", "client": client}, f"Groq ({GROQ_MODEL})"
 
 # =============================================
 # Fonctions de base
@@ -190,71 +190,40 @@ def is_followup(question: str) -> bool:
     return False
 
 
-def _build_messages_dicts(question: str, context: str, context_label: str) -> list:
-    """Construit la liste de messages au format dict (pour InferenceClient HF)."""
-    msgs = [{"role": "system", "content": RESPONSE_PROMPT}]
-    if is_followup(question):
-        history = get_chat_history()
-        for msg in history.messages[-6:]:
-            role = "user" if isinstance(msg, HumanMessage) else "assistant"
-            content = msg.content[:800] + "..." if len(msg.content) > 800 else msg.content
-            msgs.append({"role": role, "content": content})
-    msgs.append({
-        "role": "user",
-        "content": f"Contexte ({context_label}) :\n{context}\n\nQuestion : {question}"
-    })
-    return msgs
-
-
 def call_llm(question: str, context: str, context_label: str = "AI Act") -> str:
     """
     Appel LLM avec memoire CONDITIONNELLE :
     - Si la question est un suivi → historique inclus
     - Sinon → juste le contexte
 
-    Deux chemins selon l'environnement :
-    - LOCAL  : ChatOllama (LangChain), messages LangChain natifs
-    - CLOUD  : InferenceClient (huggingface_hub), messages dicts OpenAI-style
+    ChatOllama (local) et ChatGroq (cloud) utilisent tous les deux
+    l'interface LangChain standard → meme code, zero branchement.
     """
+    messages = [SystemMessage(content=RESPONSE_PROMPT)]
+
+    if is_followup(question):
+        history = get_chat_history()
+        for msg in history.messages[-6:]:
+            content = msg.content[:800] + "..." if len(msg.content) > 800 else msg.content
+            messages.append(type(msg)(content=content))
+
+    messages.append(HumanMessage(
+        content=f"Contexte ({context_label}) :\n{context}\n\nQuestion : {question}"
+    ))
+
     try:
-        if LLM_INFO["type"] == "ollama":
-            # Chemin local : LangChain messages
-            lc_messages = [SystemMessage(content=RESPONSE_PROMPT)]
-            if is_followup(question):
-                history = get_chat_history()
-                for msg in history.messages[-6:]:
-                    content = msg.content[:800] + "..." if len(msg.content) > 800 else msg.content
-                    lc_messages.append(type(msg)(content=content))
-            lc_messages.append(HumanMessage(
-                content=f"Contexte ({context_label}) :\n{context}\n\nQuestion : {question}"
-            ))
-            return LLM_INFO["client"].invoke(lc_messages).content
-
-        else:
-            # Chemin cloud : InferenceClient natif (pas de wrapper LangChain)
-            msgs = _build_messages_dicts(question, context, context_label)
-            response = LLM_INFO["client"].chat_completion(
-                messages=msgs,
-                max_tokens=1024,
-                temperature=0.1,
-            )
-            return response.choices[0].message.content
-
+        return LLM_INFO["client"].invoke(messages).content
     except Exception as e:
         error_msg = str(e)
-        if "401" in error_msg or "authentication" in error_msg.lower() or "unauthorized" in error_msg.lower():
+        if "401" in error_msg or "authentication" in error_msg.lower() or "invalid_api_key" in error_msg.lower():
             raise RuntimeError(
-                f"Erreur 401 : token HF invalide. Verifiez HF_TOKEN dans les secrets Streamlit.\n"
-                f"Detail : {error_msg}"
-            ) from e
-        elif "403" in error_msg or "gated" in error_msg.lower():
-            raise RuntimeError(
-                f"Erreur 403 : acces refuse au modele {HF_MODEL}.\n"
+                f"Erreur 401 : cle GROQ_API_KEY invalide.\n"
+                f"Verifiez le secret dans Streamlit Cloud → Settings → Secrets.\n"
                 f"Detail : {error_msg}"
             ) from e
         elif "429" in error_msg or "rate" in error_msg.lower():
             raise RuntimeError(
-                f"Erreur 429 : quota HuggingFace atteint. Reessayez dans quelques minutes.\n"
+                f"Erreur 429 : quota Groq atteint. Reessayez dans quelques secondes.\n"
                 f"Detail : {error_msg}"
             ) from e
         else:
