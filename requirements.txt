@@ -1,6 +1,8 @@
+# Dependances RAG AI Act — v2 Groq
 langchain
 langchain-community
 langchain-huggingface
+langchain-groq
 langchain-core
 langgraph
 faiss-cpu
