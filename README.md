@@ -1,15 +1,18 @@
 # Chatbot Expert AI Act (UE 2024/1689)
 
-Pipeline RAG (Retrieval-Augmented Generation) pour interroger le Reglement europeen sur l'Intelligence Artificielle en langage naturel. Tout tourne en local, aucune donnee n'est envoyee en ligne.
+Chatbot RAG pour interroger le Reglement europeen sur l'Intelligence Artificielle en langage naturel. Routage deterministe (code Python) + LLM pour la redaction. Recherche internet automatique via DuckDuckGo si l'information n'est pas dans le AI Act.
+
+Tout tourne en local sauf la recherche web.
 
 ## Stack technique
 
 | Composant | Outil | Detail |
 |---|---|---|
 | Embeddings | `paraphrase-multilingual-mpnet-base-v2` | 278M parametres, 768 dimensions, 50+ langues |
-| Vector store | FAISS (Facebook AI Similarity Search) | Index persistant sur disque |
-| LLM | Gemma 3 1B via Ollama | Inference locale |
-| Framework | LangChain (LCEL) | Orchestration de la chaine RAG |
+| Vector store | FAISS | Index persistant sur disque, recherche avec seuil de score |
+| LLM | Qwen 2.5 3B via Ollama | Inference locale, ~2 Go RAM |
+| Recherche web | DuckDuckGo (ddgs) | Fallback quand l'info n'est pas dans le AI Act |
+| Memoire | InMemoryChatMessageHistory | Memoire conditionnelle (activee sur les questions de suivi) |
 | Interface | Streamlit | Chat web avec historique |
 
 ## Structure du projet
@@ -19,32 +22,17 @@ RAG_project/
 ├── requirements.txt                      # Dependances Python
 ├── chunker.py                            # Parsing structurel du AI Act (641 chunks)
 ├── build_index.py                        # Construction de l'index vectoriel FAISS
-├── app.py                                # Interface Streamlit (chat web)
-├── chatbot_ai_act.ipynb                  # Notebook tout-en-un (alternative a app.py)
+├── app.py                                # Application Streamlit (3 modes + memoire)
+├── chatbot_ai_act.ipynb                  # Notebook tout-en-un
 ├── L-202401689FR.000101.fmx.xml.md      # Texte source du AI Act (FR)
 └── .gitignore
 ```
-
-## Description des fichiers
-
-**`chunker.py`** — Parse le Markdown du reglement et produit 641 chunks structures :
-- 180 considerants (motivations legislatives)
-- 461 chunks d'articles (113 articles, decoupes par paragraphe si > 2000 caracteres)
-- Chaque chunk contient un prefixe hierarchique et 8 champs de metadonnees
-
-**`build_index.py`** — Encode les 641 chunks avec sentence-transformers et construit l'index FAISS persistant sauvegarde sur disque.
-
-**`app.py`** — Application Streamlit avec deux modes de fonctionnement :
-- Mode direct : restitution mot a mot via recherche dans le docstore (bypass vectoriel)
-- Mode RAG : recherche semantique avec seuil de score + generation LLM
-- Trois mecanismes anti-hallucinations integres
-
-**`chatbot_ai_act.ipynb`** — Version notebook autonome avec le meme pipeline.
 
 ## Prerequis
 
 - Python 3.10+
 - [Ollama](https://ollama.com/download) installe et lance
+- ~2 Go de RAM libre (pour Qwen 2.5 3B)
 
 ## Installation
 
@@ -58,88 +46,112 @@ source .venv/bin/activate        # Linux/Mac
 
 pip install -r requirements.txt
 
-ollama pull gemma3:1b
+ollama pull qwen2.5:3b
 ```
 
 ## Utilisation
 
-### 1. Construire l'index (une seule fois)
-
 ```bash
+# 1. Construire l'index (une seule fois)
 python build_index.py
-```
 
-L'index est persistant sur disque (`faiss_index/`), recharge sans re-encodage.
-
-### 2. Lancer le chatbot
-
-```bash
+# 2. Lancer le chatbot
 streamlit run app.py
 ```
 
 Ou ouvrir `chatbot_ai_act.ipynb` dans Jupyter.
 
-## Deux modes de fonctionnement
+## 3 modes automatiques
 
-### Mode direct (filtrage metadata)
+Le routage est fait par du **code Python** (regex + score FAISS), pas par le LLM. Le LLM sert uniquement a rediger la reponse.
 
-Mentionnez un article, chapitre ou considerant pour obtenir le texte officiel mot a mot, sans appel au LLM.
+### Mode DIRECT (0 appel LLM, instantane)
 
-```
-"Donne-moi l'article 5"          → texte integral de l'article 5 (9 paragraphes)
-"Que dit le considerant 12 ?"    → texte exact du considerant 12
-"Articles du chapitre III"       → liste des articles du chapitre III
-"Article 6 paragraphe 3"         → paragraphe precis
-```
-
-Le mode direct utilise `docstore_lookup()` qui itere sur les 641 documents du docstore et filtre par metadata en Python. Cette approche bypass la recherche vectorielle car FAISS fait du post-filtrage (recherche vectorielle d'abord, filtrage ensuite), ce qui peut manquer des documents quand la question est semantiquement eloignee du contenu.
-
-### Mode RAG (recherche semantique)
-
-Pour les questions libres, le pipeline RAG classique s'active :
+Regex detecte un article ou considerant precis → restitution du texte officiel mot a mot via `docstore_lookup()` (bypass vectoriel).
 
 ```
-"Quelles sont les pratiques d'IA interdites ?"  → recherche semantique + LLM
-"Qui est responsable de la conformite ?"         → recherche semantique + LLM
+"Donne-moi l'article 5"       → texte integral (8 paragraphes)
+"Que dit le considerant 12 ?" → texte exact
 ```
 
-## Mecanismes anti-hallucinations
+### Mode RAG (1 appel LLM)
 
-1. **Seuil de score** (0.4) — Le retriever ne retourne que les documents au-dessus du seuil de similarite. Les questions hors-sujet obtiennent des scores < 0.3.
+FAISS recherche les passages pertinents (seuil de score 0.35, top-8). Le LLM redige a partir du contexte.
 
-2. **Garde-fou pre-LLM** — Si 0 documents pertinents, le LLM n'est jamais appele. Un refus poli est retourne directement.
+```
+"Je recrute par IA, suis-je conforme ?" → recherche semantique + reponse citant les articles
+"Quelles sont les sanctions ?"          → trouve Article 99 + reponse structuree
+```
 
-3. **Prompt systeme strict** — Six regles explicites contraignent le LLM. Phrases de refus imposees pour les cas hors contexte.
+### Mode WEB (1 appel LLM)
+
+Quand FAISS ne trouve rien (score < 0.35), DuckDuckGo est appele automatiquement (2 recherches : FR + EN). Le LLM repond en precisant que la source est internet.
+
+```
+"Qui a gagne Paris-Roubaix ?" → DuckDuckGo → reponse avec source internet
+```
+
+## Memoire conversationnelle
+
+La memoire utilise `InMemoryChatMessageHistory` (LangChain natif, non deprecated). Elle est **conditionnelle** :
+
+- **Question independante** ("Quelles sanctions ?") → le LLM recoit uniquement le contexte FAISS, pas l'historique. Evite la pollution par les echanges precedents.
+- **Question de suivi** ("Resume ci-dessus", "Explique en detail") → l'historique des 3 derniers echanges est inclus dans le prompt.
+
+La detection de suivi se fait par 2 signaux :
+1. References explicites : "ci-dessus", "precedent", "ta reponse", "ces articles"
+2. Verbes d'action en debut de phrase : "resume", "explique", "continue", "et pour..."
+
+## Architecture
+
+```
+Question
+    |
+    v
+Regex detecte article/considerant ?
+    |
+   oui → docstore_lookup → texte mot a mot (0 LLM)
+    |
+   non
+    |
+    v
+FAISS retriever (score > 0.35) ?
+    |
+   oui → contexte + [historique si suivi] → LLM redige (1 LLM)
+    |
+   non
+    |
+    v
+DuckDuckGo (FR + EN)
+    |
+    v
+contexte web + [historique si suivi] → LLM redige (1 LLM)
+```
 
 ## Configuration
 
-Parametres modifiables en haut de `app.py` :
-
 | Parametre | Defaut | Description |
 |---|---|---|
-| `LLM_MODEL` | `"gemma3:1b"` | Modele Ollama |
-| `SCORE_THRESHOLD` | `0.4` | Seuil de pertinence (augmenter = plus strict) |
-| `TOP_K` | `5` | Nombre max de documents en mode RAG |
+| `LLM_MODEL` | `"qwen2.5:3b"` | Modele Ollama |
+| `SCORE_THRESHOLD` | `0.35` | Seuil de pertinence FAISS |
+| `TOP_K` | `8` | Nombre max de documents en mode RAG |
 
-Modeles LLM compatibles :
+## Exemples
 
-| Modele | RAM | Precision |
-|---|---|---|
-| `gemma3:1b` | ~1.5 Go | Correcte |
-| `gemma3:4b` | ~3 Go | Bonne |
-| `mistral` | ~5 Go | Tres bonne |
+Questions AI Act :
+- Donne-moi l'article 5
+- Que dit le considerant 12 ?
+- Je recrute par IA, suis-je conforme ?
+- Quelles sont les sanctions ?
 
-## Exemples de questions
+Questions de suivi :
+- Resume les points ci-dessus
+- Explique en detail
+- Et pour le recrutement ?
 
-Questions couvertes :
-- Quelles sont les pratiques d'IA interdites ?
-- Qu'est-ce qu'un systeme d'IA a haut risque ?
-- Donne-moi l'article 60
-- Que dit le considerant 176 ?
-
-Questions hors-sujet (refus poli) :
-- Qu'est-ce que le Bitcoin ?
-- Quelle est la capitale de la France ?
+Questions hors AI Act :
+- Qui a gagne Paris-Roubaix ?
+- Qui etait Jacques Chirac ?
 
 ## Licence
 
