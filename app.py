@@ -1,22 +1,21 @@
 """
 Chatbot Expert AI Act — Routage deterministe + LLM pour la redaction.
 
-Le routage est fait par du code Python (regex + score FAISS), pas par le LLM.
-Le LLM sert UNIQUEMENT a rediger la reponse a partir du contexte recupere.
+Supporte 2 environnements :
+- LOCAL : Ollama (qwen2.5:3b) — pas de cle API, tout en local
+- CLOUD : HuggingFace Inference API — pour Streamlit Cloud (cle HF_TOKEN requise)
 
-3 modes automatiques :
-- DIRECT : regex detecte article/considerant → texte mot a mot (0 appel LLM)
-- RAG : FAISS trouve des passages pertinents → LLM redige (1 appel LLM)
-- WEB : FAISS ne trouve rien → DuckDuckGo + LLM redige (1 appel LLM)
+La detection est automatique : si Ollama repond sur localhost, on l'utilise.
+Sinon, on bascule sur HuggingFace.
 """
 
+import os
 import re
 from pathlib import Path
 
 import streamlit as st
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_community.tools import DuckDuckGoSearchRun
@@ -26,9 +25,13 @@ from langchain_community.tools import DuckDuckGoSearchRun
 # =============================================
 INDEX_DIR       = Path(__file__).parent / "faiss_index"
 MODEL_NAME      = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-LLM_MODEL       = "qwen2.5:3b"
 SCORE_THRESHOLD = 0.35
 TOP_K           = 8
+
+# Modele HuggingFace pour le cloud (gratuit, bon en francais)
+HF_MODEL        = "mistralai/Mistral-7B-Instruct-v0.3"
+# Modele Ollama pour le local
+OLLAMA_MODEL    = "qwen2.5:3b"
 
 # =============================================
 # Prompt unique : redaction de la reponse
@@ -60,9 +63,46 @@ def load_vectorstore():
     )
     return FAISS.load_local(str(INDEX_DIR), embeddings, allow_dangerous_deserialization=True)
 
+def is_ollama_available() -> bool:
+    """Verifie si Ollama tourne sur localhost."""
+    try:
+        import requests
+        r = requests.get("http://localhost:11434/api/tags", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 @st.cache_resource
 def load_llm():
-    return ChatOllama(model=LLM_MODEL, temperature=0.1)
+    """
+    Charge le LLM automatiquement :
+    - Si Ollama est disponible (local) → ChatOllama
+    - Sinon (Streamlit Cloud) → HuggingFace Inference API
+    """
+    if is_ollama_available():
+        from langchain_ollama import ChatOllama
+        llm = ChatOllama(model=OLLAMA_MODEL, temperature=0.1)
+        return llm, f"Ollama ({OLLAMA_MODEL})"
+    else:
+        from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+        # La cle HF_TOKEN doit etre dans les secrets Streamlit ou les variables d'env
+        hf_token = os.environ.get("HF_TOKEN") or st.secrets.get("HF_TOKEN", "")
+        if not hf_token:
+            st.error(
+                "Cle HuggingFace requise pour le mode cloud.\n\n"
+                "Ajoutez `HF_TOKEN` dans les secrets Streamlit :\n"
+                "`.streamlit/secrets.toml` avec `HF_TOKEN = \"hf_...\"`"
+            )
+            st.stop()
+        endpoint = HuggingFaceEndpoint(
+            repo_id=HF_MODEL,
+            huggingfacehub_api_token=hf_token,
+            temperature=0.1,
+            max_new_tokens=1024,
+        )
+        llm = ChatHuggingFace(llm=endpoint)
+        return llm, f"HuggingFace ({HF_MODEL})"
 
 # =============================================
 # Fonctions de base
@@ -98,7 +138,7 @@ def get_sources(docs):
 # =============================================
 
 db = load_vectorstore()
-llm = load_llm()
+llm, LLM_LABEL = load_llm()
 retriever = db.as_retriever(
     search_type="similarity_score_threshold",
     search_kwargs={"k": TOP_K, "score_threshold": SCORE_THRESHOLD},
@@ -281,7 +321,7 @@ def process_question(question: str) -> dict:
 
 st.set_page_config(page_title="Expert AI Act", page_icon="EU", layout="wide")
 st.title("Expert AI Act (UE 2024/1689)")
-st.caption(f"RAG + DuckDuckGo — {LLM_MODEL}")
+st.caption(f"RAG + DuckDuckGo — {LLM_LABEL}")
 
 with st.sidebar:
     st.header("3 modes automatiques")
