@@ -57,6 +57,12 @@ REGLES :
    fournis un resume synthetique, pas le texte integral.
 9. Pour les questions sans rapport avec le AI Act (blagues, culture generale, etc.), \
    reponds normalement sans forcer de lien avec le reglement.
+10. Si on te demande de repondre avec tes propres connaissances et que tu ne connais \
+    PAS la reponse ou que tes informations sont trop vagues/incertaines, reponds \
+    EXACTEMENT avec le marqueur [RECHERCHE_WEB] sur la premiere ligne, suivi d'une \
+    breve explication de ce que tu cherches. Exemple :
+    [RECHERCHE_WEB]
+    Je n'ai pas d'information fiable sur ce sujet.
 """
 
 # =============================================
@@ -349,8 +355,60 @@ def process_question(question: str) -> dict:
         }
 
     # ========================================
-    # MODE 3 : WEB — DuckDuckGo + LLM (1 appel LLM)
-    # On fait 2 recherches (FR + EN) pour maximiser les resultats
+    # MODE 2bis : CONVERSATION — question de suivi ou courte reference
+    # Si l'historique existe et que la question semble etre un suivi,
+    # on repond avec le LLM + historique SANS chercher sur internet.
+    # Evite que "etait-il un peintre aussi?" cherche sur DuckDuckGo
+    # et retourne un resultat sans rapport.
+    # ========================================
+    history = get_chat_history()
+    if history.messages:
+        is_short = len(question.split()) < 15
+        has_pronoun = bool(re.search(
+            r"\b(il|elle|ils|elles|lui|son|sa|ses|leur|ce|cet|cette|ces|"
+            r"le meme|la meme|aussi|egalement|en plus|de plus|"
+            r"je m.appelle|mon nom|comment je|qui suis|quel |sur quel|"
+            r"a.?t.?il|a.?t.?elle|est.?il|est.?elle|etait.?il|etait.?elle|"
+            r"le pr[eé]c[eé]dent|ci.?dessus|plus haut|ta r[eé]ponse)\b",
+            q
+        ))
+        if is_short and has_pronoun:
+            response_text = call_llm(
+                question,
+                "Pas de contexte supplementaire. Reponds en utilisant l'historique de conversation.",
+                "Conversation (historique)",
+            )
+            return {
+                "response": response_text,
+                "sources": [],
+                "mode": "Conversation (memoire)",
+            }
+
+    # ========================================
+    # MODE 3 : LLM SEUL — connaissances propres du modele
+    # Le LLM repond avec ses connaissances. S'il ne sait pas,
+    # il repond [RECHERCHE_WEB] → on declenche DuckDuckGo.
+    # ========================================
+    response_text = call_llm(
+        question,
+        "Aucun document pertinent dans la base AI Act. "
+        "Reponds avec tes propres connaissances. "
+        "Si tu ne connais PAS la reponse ou que tu n'es pas sur, "
+        "reponds EXACTEMENT [RECHERCHE_WEB] sur la premiere ligne.",
+        "Connaissances du modele",
+    )
+
+    # Si le LLM sait repondre → on retourne sa reponse
+    if "[RECHERCHE_WEB]" not in response_text:
+        return {
+            "response": response_text,
+            "sources": ["Connaissances du modele"],
+            "mode": "LLM (connaissances propres)",
+        }
+
+    # ========================================
+    # MODE 4 : WEB — DuckDuckGo + LLM (1 appel LLM)
+    # Declenche UNIQUEMENT si le LLM a dit [RECHERCHE_WEB]
     # ========================================
     search = DuckDuckGoSearchRun()
     web_parts = []
@@ -361,7 +419,6 @@ def process_question(question: str) -> dict:
     except Exception:
         pass
     try:
-        # Recherche en anglais (souvent meilleurs resultats)
         r_en = search.invoke(question + " results 2025")
         if r_en:
             web_parts.append(r_en)
@@ -385,7 +442,8 @@ def process_question(question: str) -> dict:
     # FALLBACK : rien trouve nulle part
     # ========================================
     return {
-        "response": "Je n'ai trouve aucune information pertinente, ni dans le AI Act ni sur internet.",
+        "response": "Je n'ai trouve aucune information pertinente, ni dans le AI Act, "
+                     "ni dans mes connaissances, ni sur internet.",
         "sources": [],
         "mode": "Aucun resultat",
     }
@@ -399,16 +457,20 @@ st.title("Expert AI Act (UE 2024/1689)")
 st.caption(f"RAG + DuckDuckGo — {LLM_LABEL}")
 
 with st.sidebar:
-    st.header("3 modes automatiques")
+    st.header("4 modes automatiques")
     st.markdown(
-        "**Direct** : article ou considerant mot a mot\n\n"
-        "**RAG** : recherche semantique + reponse IA\n\n"
-        "**Web** : recherche internet si hors AI Act\n\n"
+        "**1. Direct** : article, considerant ou annexe mot a mot\n\n"
+        "**2. RAG** : recherche semantique dans le AI Act + reponse IA\n\n"
+        "**3. LLM** : connaissances propres du modele\n\n"
+        "**4. Web** : recherche internet (si le LLM ne sait pas)\n\n"
         "---\n"
         "Exemples :\n"
         "- *Donne-moi l'article 5*\n"
-        "- *Que dit le considerant 12 ?*\n"
+        "- *Articles 5 et 8*\n"
+        "- *Resume le considerant 12*\n"
+        "- *Annexe III*\n"
         "- *Je recrute par IA, suis-je conforme ?*\n"
+        "- *Qui est Emmanuel Macron ?*\n"
         "- *Qui a gagne Paris-Roubaix ?*"
     )
 
