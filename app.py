@@ -255,7 +255,8 @@ def process_question(question: str) -> dict:
     # Si oui, on passe par le LLM meme pour un article/considerant precis.
     # ========================================
     wants_analysis = bool(re.search(
-        r"(resum|synthe|explique|compar|analys|simplifie|vulgar|tradui|"
+        r"(r[eé]sum|synth[eé]|explique|compar|analys|simplifie|vulgar|tradui|"
+        r"d[eé]taille|d[eé]veloppe|pr[eé]cise|reformule|"
         r"en quoi|que signifie|que veut dire|qu.?est.ce que|comment)",
         q
     ))
@@ -366,13 +367,21 @@ def process_question(question: str) -> dict:
         is_short = len(question.split()) < 15
         has_pronoun = bool(re.search(
             r"\b(il|elle|ils|elles|lui|son|sa|ses|leur|ce|cet|cette|ces|"
-            r"le meme|la meme|aussi|egalement|en plus|de plus|"
+            r"le meme|la meme|aussi|[eé]galement|en plus|de plus|"
             r"je m.appelle|mon nom|comment je|qui suis|quel |sur quel|"
-            r"a.?t.?il|a.?t.?elle|est.?il|est.?elle|etait.?il|etait.?elle|"
+            r"a.?t.?il|a.?t.?elle|est.?il|est.?elle|[eé]tait.?il|[eé]tait.?elle|"
             r"le pr[eé]c[eé]dent|ci.?dessus|plus haut|ta r[eé]ponse)\b",
             q
         ))
-        if is_short and has_pronoun:
+        # Verbe d'action en debut de phrase courte = reference implicite
+        # "resume le", "explique ca", "detaille", "continue"
+        action_followup = bool(re.match(
+            r"^(r[eé]sum|synth[eé]|explique|d[eé]taille|d[eé]veloppe|pr[eé]cise|"
+            r"reformule|tradui|simplifie|continue|poursui|compl[eè]te|approfondi|"
+            r"r[eé]p[eè]te|redis|relis)",
+            q
+        ))
+        if is_short and (has_pronoun or action_followup):
             response_text = call_llm(
                 question,
                 "Pas de contexte supplementaire. Reponds en utilisant l'historique de conversation.",

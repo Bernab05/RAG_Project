@@ -1,6 +1,6 @@
 # Chatbot Expert AI Act (UE 2024/1689)
 
-Chatbot RAG pour interroger le Reglement europeen sur l'Intelligence Artificielle. Routage deterministe + LLM pour la redaction. Recherche internet automatique via DuckDuckGo si l'information n'est pas dans le AI Act.
+Chatbot RAG pour interroger le Reglement europeen sur l'Intelligence Artificielle. Routage deterministe + LLM pour la redaction. Le LLM utilise d'abord ses propres connaissances, puis recherche sur internet uniquement s'il ne sait pas.
 
 Fonctionne en local (Ollama) et sur Streamlit Cloud (Groq).
 
@@ -12,7 +12,7 @@ Fonctionne en local (Ollama) et sur Streamlit Cloud (Groq).
 | Vector store | FAISS | 796 chunks indexes (articles + considerants + annexes) |
 | LLM (local) | Qwen 2.5 3B via Ollama | ~2 Go RAM, detection automatique |
 | LLM (cloud) | Llama 3.1 8B Instant via Groq | Cle API gratuite (GROQ_API_KEY) |
-| Recherche web | DuckDuckGo (ddgs) | Fallback quand l'info n'est pas dans le AI Act |
+| Recherche web | DuckDuckGo (ddgs) | Dernier recours si le LLM ne sait pas |
 | Memoire | InMemoryChatMessageHistory | Systematique (6 derniers messages toujours inclus) |
 | Interface | Streamlit | Chat web avec historique |
 
@@ -23,7 +23,7 @@ RAG_project/
 ├── requirements.txt                              # Dependances Python
 ├── chunker.py                                    # Parsing structurel du AI Act (796 chunks)
 ├── build_index.py                                # Construction de l'index vectoriel FAISS
-├── app.py                                        # Application Streamlit (3 modes + memoire)
+├── app.py                                        # Application Streamlit (4 modes + memoire)
 ├── chatbot_ai_act.ipynb                          # Notebook tout-en-un
 ├── OJ_L_202401689_FR_TXTavec annexes.md         # Texte source complet (articles + 13 annexes)
 ├── faiss_index/                                  # Index FAISS (committe pour Streamlit Cloud)
@@ -77,11 +77,13 @@ Ollama repond sur localhost:11434 ?
    non → ChatGroq (Llama 3.1 8B Instant, API Groq, gratuit)
 ```
 
-## 3 modes automatiques
+## 4 modes automatiques
 
-Le routage est fait par du **code Python** (regex + score FAISS), pas par le LLM.
+Le routage est fait par du **code Python** (regex + score FAISS + detection de suivi), pas par le LLM.
 
-### Mode DIRECT (0 ou 1 appel LLM)
+### Mode 1 — DIRECT (0 ou 1 appel LLM)
+
+Regex detecte un article, considerant ou annexe. Retourne le texte integral, ou le passe au LLM si un resume/explication est demande.
 
 ```
 "Donne-moi l'article 5"        → texte integral (0 LLM)
@@ -93,26 +95,52 @@ Le routage est fait par du **code Python** (regex + score FAISS), pas par le LLM
 "Explique le considerant 12"   → texte passe au LLM pour explication (1 LLM)
 ```
 
-### Mode RAG (1 appel LLM)
+### Mode 2 — RAG (1 appel LLM)
+
+FAISS trouve des documents pertinents → le LLM redige avec le contexte.
 
 ```
 "Je recrute par IA, conforme ?" → FAISS top-8 + LLM redige avec citations
 "Quelles sanctions ?"           → Article 99 + reponse structuree
 ```
 
-### Mode WEB (1 appel LLM)
+### Mode 2bis — CONVERSATION (1 appel LLM, pas de recherche)
+
+Question de suivi detectee (pronoms, verbes d'action, phrase courte). Le LLM repond avec l'historique seul, sans polluer avec DuckDuckGo.
 
 ```
-"Qui a gagne Paris-Roubaix ?"  → DuckDuckGo (FR + EN) + LLM redige
+"Etait-il un grand peintre ?"  → utilise l'historique (pas de web)
+"Resume le"                    → resume le dernier contenu discute
+"Comment je m'appelle ?"       → retrouve le prenom dans l'historique
+"Repete la blague"             → utilise l'historique
+```
+
+### Mode 3 — LLM SEUL (1 appel LLM)
+
+Ni le RAG ni la conversation ne donnent de resultat. Le LLM repond avec ses propres connaissances. S'il ne sait pas, il emet le marqueur `[RECHERCHE_WEB]` qui declenche le mode 4.
+
+```
+"Qui est Emmanuel Macron ?"    → reponse directe du LLM
+"Raconte une blague de Toto"   → reponse directe du LLM
+```
+
+### Mode 4 — WEB (1 appel LLM)
+
+Declenche uniquement si le LLM a repondu `[RECHERCHE_WEB]` (il ne sait pas). DuckDuckGo (FR + EN) + LLM redige.
+
+```
+"Qui a gagne Paris-Roubaix ?"  → LLM ne sait pas → DuckDuckGo → reponse
 ```
 
 ## Memoire conversationnelle
 
-`InMemoryChatMessageHistory` (LangChain natif). Les 6 derniers messages sont **toujours** envoyes au LLM, ce qui permet :
+`InMemoryChatMessageHistory` (LangChain natif). Les 6 derniers messages sont **toujours** envoyes au LLM.
 
-- Questions de suivi : "resume ci-dessus", "et pour les PME ?"
-- References implicites : "comment je m'appelle ?", "sur quel roi ?"
-- Continuite naturelle de conversation
+La detection de suivi conversationnel utilise 2 signaux :
+- **Pronoms/references** : il, elle, son, sa, ce, cette, quel, sur quel, a-t-il, est-elle, ci-dessus, ta reponse...
+- **Verbes d'action en debut de phrase** : resume, explique, detaille, continue, repete, redis...
+
+Cela evite que "etait-il un peintre aussi ?" parte sur DuckDuckGo et retourne un resultat sans rapport.
 
 ## Architecture
 
@@ -120,16 +148,21 @@ Le routage est fait par du **code Python** (regex + score FAISS), pas par le LLM
 Question
     |
     v
-Resume/explication demande ? (regex)
+1. Regex article/considerant/annexe ?
+   oui → docstore_lookup → texte integral (0 LLM)
+    |                       ou synthese LLM si resume demande (1 LLM)
+    v
+2. FAISS (score > 0.35) ?
+   oui → contexte AI Act + historique → LLM (1 appel)
     |
     v
-Regex article/considerant/annexe ?
-   oui → docstore_lookup → texte mot a mot (0 LLM)
-    |                       ou synthese LLM si resume demande (1 LLM)
-   non → FAISS (score > 0.35) ?
-          oui → contexte + historique → LLM (1 appel)
-           |
-          non → DuckDuckGo (FR + EN) + historique → LLM (1 appel)
+3. Question de suivi ? (pronoms + phrase courte, OU verbe d'action)
+   oui → LLM + historique seul (0 recherche)
+    |
+    v
+4. LLM repond avec ses connaissances propres
+   → Si [RECHERCHE_WEB] → DuckDuckGo (FR + EN) → LLM (1 appel)
+   → Sinon → reponse directe
 ```
 
 ## Donnees indexees
