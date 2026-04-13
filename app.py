@@ -77,16 +77,16 @@ def is_ollama_available() -> bool:
 def load_llm():
     """
     Charge le LLM automatiquement :
-    - Si Ollama est disponible (local) → ChatOllama
-    - Sinon (Streamlit Cloud) → HuggingFace Inference API
+    - Si Ollama est disponible (local) → ChatOllama (LangChain)
+    - Sinon (Streamlit Cloud) → InferenceClient (huggingface_hub natif, sans wrapper LangChain)
+    Retourne un dict {"type": "ollama"|"hf", "client": ...}
     """
     if is_ollama_available():
         from langchain_ollama import ChatOllama
-        llm = ChatOllama(model=OLLAMA_MODEL, temperature=0.1)
-        return llm, f"Ollama ({OLLAMA_MODEL})"
+        client = ChatOllama(model=OLLAMA_MODEL, temperature=0.1)
+        return {"type": "ollama", "client": client}, f"Ollama ({OLLAMA_MODEL})"
     else:
-        from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
-        # La cle HF_TOKEN doit etre dans les secrets Streamlit ou les variables d'env
+        from huggingface_hub import InferenceClient
         hf_token = (
             os.environ.get("HF_TOKEN")
             or st.secrets.get("HF_TOKEN", "")
@@ -99,27 +99,9 @@ def load_llm():
                 "Cle gratuite sur : https://huggingface.co/settings/tokens"
             )
             st.stop()
-        # IMPORTANT : les nouvelles versions de langchain-huggingface lisent
-        # le token depuis la variable d'environnement, pas depuis le parametre.
-        os.environ["HUGGINGFACEHUB_API_TOKEN"] = hf_token
-        os.environ["HF_TOKEN"] = hf_token
-        try:
-            endpoint = HuggingFaceEndpoint(
-                repo_id=HF_MODEL,
-                task="text-generation",
-                huggingfacehub_api_token=hf_token,
-                temperature=0.1,
-                max_new_tokens=1024,
-            )
-            llm = ChatHuggingFace(llm=endpoint)
-            return llm, f"HuggingFace ({HF_MODEL})"
-        except Exception as e:
-            st.error(
-                f"Erreur de chargement du LLM HuggingFace : {e}\n\n"
-                "Verifiez que votre HF_TOKEN est valide et dispose des permissions 'read'.\n"
-                "Cle gratuite sur : https://huggingface.co/settings/tokens"
-            )
-            st.stop()
+        # InferenceClient : API native huggingface_hub, sans wrapper LangChain
+        client = InferenceClient(model=HF_MODEL, token=hf_token)
+        return {"type": "hf", "client": client}, f"HuggingFace ({HF_MODEL})"
 
 # =============================================
 # Fonctions de base
@@ -155,7 +137,7 @@ def get_sources(docs):
 # =============================================
 
 db = load_vectorstore()
-llm, LLM_LABEL = load_llm()
+LLM_INFO, LLM_LABEL = load_llm()
 retriever = db.as_retriever(
     search_type="similarity_score_threshold",
     search_kwargs={"k": TOP_K, "score_threshold": SCORE_THRESHOLD},
@@ -208,48 +190,72 @@ def is_followup(question: str) -> bool:
     return False
 
 
+def _build_messages_dicts(question: str, context: str, context_label: str) -> list:
+    """Construit la liste de messages au format dict (pour InferenceClient HF)."""
+    msgs = [{"role": "system", "content": RESPONSE_PROMPT}]
+    if is_followup(question):
+        history = get_chat_history()
+        for msg in history.messages[-6:]:
+            role = "user" if isinstance(msg, HumanMessage) else "assistant"
+            content = msg.content[:800] + "..." if len(msg.content) > 800 else msg.content
+            msgs.append({"role": role, "content": content})
+    msgs.append({
+        "role": "user",
+        "content": f"Contexte ({context_label}) :\n{context}\n\nQuestion : {question}"
+    })
+    return msgs
+
+
 def call_llm(question: str, context: str, context_label: str = "AI Act") -> str:
     """
     Appel LLM avec memoire CONDITIONNELLE :
-    - Si la question est un suivi (ci-dessus, resume, etc.) → historique inclus
-    - Sinon → juste le contexte (pas de pollution par l'historique)
+    - Si la question est un suivi → historique inclus
+    - Sinon → juste le contexte
+
+    Deux chemins selon l'environnement :
+    - LOCAL  : ChatOllama (LangChain), messages LangChain natifs
+    - CLOUD  : InferenceClient (huggingface_hub), messages dicts OpenAI-style
     """
-    messages = [SystemMessage(content=RESPONSE_PROMPT)]
-
-    # Inclure l'historique SEULEMENT si c'est une question de suivi
-    if is_followup(question):
-        history = get_chat_history()
-        recent = history.messages[-6:]
-        for msg in recent:
-            if len(msg.content) > 800:
-                messages.append(type(msg)(content=msg.content[:800] + "..."))
-            else:
-                messages.append(msg)
-
-    # Contexte + question
-    messages.append(HumanMessage(
-        content=f"Contexte ({context_label}) :\n{context}\n\nQuestion : {question}"
-    ))
-
     try:
-        return llm.invoke(messages).content
+        if LLM_INFO["type"] == "ollama":
+            # Chemin local : LangChain messages
+            lc_messages = [SystemMessage(content=RESPONSE_PROMPT)]
+            if is_followup(question):
+                history = get_chat_history()
+                for msg in history.messages[-6:]:
+                    content = msg.content[:800] + "..." if len(msg.content) > 800 else msg.content
+                    lc_messages.append(type(msg)(content=content))
+            lc_messages.append(HumanMessage(
+                content=f"Contexte ({context_label}) :\n{context}\n\nQuestion : {question}"
+            ))
+            return LLM_INFO["client"].invoke(lc_messages).content
+
+        else:
+            # Chemin cloud : InferenceClient natif (pas de wrapper LangChain)
+            msgs = _build_messages_dicts(question, context, context_label)
+            response = LLM_INFO["client"].chat_completion(
+                messages=msgs,
+                max_tokens=1024,
+                temperature=0.1,
+            )
+            return response.choices[0].message.content
+
     except Exception as e:
         error_msg = str(e)
-        if "401" in error_msg or "authentication" in error_msg.lower():
+        if "401" in error_msg or "authentication" in error_msg.lower() or "unauthorized" in error_msg.lower():
             raise RuntimeError(
-                "Erreur 401 : HF_TOKEN invalide ou expire. "
-                "Regenerez votre token sur https://huggingface.co/settings/tokens"
+                f"Erreur 401 : token HF invalide. Verifiez HF_TOKEN dans les secrets Streamlit.\n"
+                f"Detail : {error_msg}"
             ) from e
-        elif "403" in error_msg or "gated" in error_msg.lower() or "access" in error_msg.lower():
+        elif "403" in error_msg or "gated" in error_msg.lower():
             raise RuntimeError(
-                f"Erreur 403 : Acces refuse au modele {HF_MODEL}. "
-                "Ce modele est peut-etre 'gated' (acces restreint). "
-                "Acceptez les CGU sur la page HuggingFace du modele."
+                f"Erreur 403 : acces refuse au modele {HF_MODEL}.\n"
+                f"Detail : {error_msg}"
             ) from e
         elif "429" in error_msg or "rate" in error_msg.lower():
             raise RuntimeError(
-                "Erreur 429 : Limite de requetes HuggingFace atteinte. "
-                "Attendez quelques minutes et reessayez."
+                f"Erreur 429 : quota HuggingFace atteint. Reessayez dans quelques minutes.\n"
+                f"Detail : {error_msg}"
             ) from e
         else:
             raise RuntimeError(f"Erreur LLM : {error_msg}") from e
