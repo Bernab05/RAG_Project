@@ -103,7 +103,7 @@ def load_llm():
             "1. Créez un compte gratuit sur https://console.groq.com\n"
             "2. Générez une clé API\n"
             "3. Ajoutez dans Streamlit Cloud → Settings → Secrets :\n"
-            "   `GROQ_API_KEY = \"gsk_...\"`"
+            '   `GROQ_API_KEY = "gsk_..."`'
         )
         st.stop()
     return ChatGroq(model=GROQ_MODEL, api_key=groq_api_key, temperature=0.1)
@@ -369,10 +369,20 @@ def process_question(question: str) -> dict:
 
 st.set_page_config(page_title="Expert AI Act (Agent)", page_icon="🤖", layout="wide")
 st.title("Expert AI Act — Mode Agent 🤖")
-st.caption(f"Agent LangGraph + {GROQ_MODEL} (Groq) — 5 outils")
+st.caption(f"Agent LangGraph + Groq — 5 outils")
 
 with st.sidebar:
     st.header("Mode Agent LangGraph")
+
+    # Bouton nouvelle conversation
+    if st.button("🔄 Nouvelle conversation", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.chat_history = InMemoryChatMessageHistory()
+        st.session_state.last_sources = []
+        st.rerun()
+
+    st.markdown("---")
+
     st.markdown(
         "L'agent **décide lui-même** quel outil appeler.\n\n"
         "**5 outils disponibles :**\n"
@@ -387,9 +397,7 @@ with st.sidebar:
         "- *Articles 5 et 8*\n"
         "- *Résume le considérant 12*\n"
         "- *Annexe III*\n"
-        "- *Je recrute par IA, suis-je conforme ?*\n"
-        "- *Qui est Emmanuel Macron ?*\n"
-        "- *Qui a gagné Paris-Roubaix ?*\n\n"
+        "- *Je recrute par IA, suis-je conforme ?*\n\n"
         "---\n"
         "**Différence avec app.py :**\n"
         "- app.py = routage déterministe (regex)\n"
@@ -397,47 +405,43 @@ with st.sidebar:
     )
 
 if not INDEX_DIR.exists():
-    st.error("Index FAISS introuvable.\n\n```\npython build_index.py\n```")
+    st.error("Index FAISS introuvable. Exécutez :\n\n```\npython build_index.py\n```")
     st.stop()
 
 # Historique d'affichage
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-# Entrée utilisateur
+# Entrée utilisateur (en haut, avant l'historique)
 if question := st.chat_input("Posez votre question..."):
-    # Afficher la question
-    st.session_state.messages.append({"role": "user", "content": question})
-    with st.chat_message("user"):
-        st.markdown(question)
-
     # Traitement par l'agent
-    with st.chat_message("assistant"):
-        with st.spinner("L'agent réfléchit..."):
-            result = process_question(question)
+    with st.spinner("L'agent réfléchit..."):
+        result = process_question(question)
 
-        st.markdown(result["response"])
-
-        # Afficher les outils appelés
-        if result["tools_called"]:
-            with st.expander(f"🔧 Outils appelés ({len(result['tools_called'])})"):
-                for tc in result["tools_called"]:
-                    st.code(tc, language="python")
-
-        # Afficher les sources
-        if result["sources"]:
-            with st.expander(f"📚 Sources ({len(result['sources'])})"):
-                for s in result["sources"]:
-                    st.markdown(f"- {s}")
-
-    # Sauvegarder dans l'affichage Streamlit
-    st.session_state.messages.append({"role": "assistant", "content": result["response"]})
+    # Sauvegarder dans l'affichage Streamlit (la dernière question + réponse en premier)
+    st.session_state.messages.insert(0, {"role": "assistant", "content": result["response"],
+                                         "tools_called": result.get("tools_called", []),
+                                         "sources": result.get("sources", [])})
+    st.session_state.messages.insert(0, {"role": "user", "content": question})
 
     # Sauvegarder dans la mémoire LLM
     history = get_chat_history()
     history.add_message(HumanMessage(content=question))
     history.add_message(AIMessage(content=result["response"]))
+
+    st.rerun()
+
+# Afficher l'historique (dernier échange en haut)
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        # Afficher les outils appelés (si message assistant)
+        if msg["role"] == "assistant" and msg.get("tools_called"):
+            with st.expander(f"🔧 Outils appelés ({len(msg['tools_called'])})"):
+                for tc in msg["tools_called"]:
+                    st.code(tc, language="python")
+        # Afficher les sources (si message assistant)
+        if msg["role"] == "assistant" and msg.get("sources"):
+            with st.expander(f"📚 Sources ({len(msg['sources'])})"):
+                for s in msg["sources"]:
+                    st.markdown(f"- {s}")
