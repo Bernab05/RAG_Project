@@ -107,7 +107,7 @@ Question
 
 ### app_agent.py — Agent LangGraph
 
-Le **LLM décide lui-même** quel outil appeler via le mécanisme de tool calling.
+Le **LLM décide lui-même** quel outil appeler via le mécanisme de **tool calling** (boucle ReAct).
 
 ```
 Question
@@ -120,13 +120,23 @@ Le LLM reçoit 5 outils et décide :
     ├── recherche_considerant("12")   → docstore_lookup → texte intégral
     ├── recherche_annexe("III")       → docstore_lookup → texte intégral
     ├── recherche_ia_act("obligations")→ FAISS retriever → chunks pertinents
-    └── recherche_web("actualité")    → DuckDuckGo (dernier recours)
+    │
+    │  Si aucun outil AI Act ne trouve :
+    ├── Connaissances internes du modèle (données d'entraînement)
+    │   → Si suffisant : réponse directe
+    │   → Si insuffisant ↓
+    └── recherche_web("actualité")    → DuckDuckGo (indique "source internet")
     │
     ▼
 Réponse rédigée par le LLM
 ```
 
-**5 outils déclarés avec `@tool` :**
+**Logique de priorité (définie dans le prompt système) :**
+1. Outils AI Act (base FAISS locale) → pas d'accès internet
+2. Connaissances internes du modèle → pas d'accès internet
+3. `recherche_web` (DuckDuckGo) → accès internet, **toujours signalé dans la réponse**
+
+**5 outils déclarés avec le décorateur `@tool` :**
 
 ```python
 @tool
@@ -136,7 +146,7 @@ def recherche_article(article_num: str) -> str:
     return format_docs(docs)
 ```
 
-Le LLM lit les **docstrings** pour décider quand appeler chaque outil.
+Le LLM lit les **docstrings** pour décider quand appeler chaque outil. Il ne voit jamais le code Python.
 
 ## Comparaison des deux approches
 
@@ -157,7 +167,7 @@ Le LLM lit les **docstrings** pour décider quand appeler chaque outil.
 
 **app.py** ajoute une détection de suivi conversationnel (pronoms + verbes d'action) pour éviter les recherches web parasites.
 
-**app_agent.py** laisse l'agent gérer naturellement les questions de suivi grâce à l'historique envoyé dans les messages.
+**app_agent.py** laisse l'agent gérer naturellement les questions de suivi grâce à l'historique envoyé dans les messages. Pour les questions hors AI Act, l'agent cherche d'abord dans les connaissances internes du modèle, puis utilise `recherche_web` si insuffisant — et indique toujours que l'information vient d'internet.
 
 ## Données indexées
 
