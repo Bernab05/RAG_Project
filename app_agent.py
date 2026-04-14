@@ -34,7 +34,7 @@ INDEX_DIR       = Path(__file__).parent / "faiss_index"
 MODEL_NAME      = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 SCORE_THRESHOLD = 0.35
 TOP_K           = 8
-GROQ_MODEL      = "llama-3.1-8b-instant"
+GROQ_MODEL      = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 # =============================================
 # Prompt système pour l'agent
