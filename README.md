@@ -1,35 +1,44 @@
 # Chatbot Expert AI Act (UE 2024/1689)
 
-Chatbot RAG pour interroger le Reglement europeen sur l'Intelligence Artificielle. Routage deterministe + LLM pour la redaction. Le LLM utilise d'abord ses propres connaissances, puis recherche sur internet uniquement s'il ne sait pas.
+Chatbot RAG pour interroger le Règlement européen sur l'Intelligence Artificielle.
 
-Fonctionne en local (Ollama) et sur Streamlit Cloud (Groq).
+**Deux versions disponibles :**
+- **`app.py`** — Routage déterministe (regex + FAISS + code Python). Fonctionne en local (Ollama) et sur Streamlit Cloud (Groq).
+- **`app_agent.py`** — Agent LangGraph avec tool calling. Le LLM décide lui-même quel outil appeler. Cloud uniquement (Groq).
 
 ## Stack technique
 
-| Composant | Outil | Detail |
+| Composant | app.py (déterministe) | app_agent.py (agent) |
 |---|---|---|
-| Embeddings | `paraphrase-multilingual-mpnet-base-v2` | 278M parametres, 768 dimensions, 50+ langues |
-| Vector store | FAISS | 796 chunks indexes (articles + considerants + annexes) |
-| LLM (local) | Qwen 2.5 3B via Ollama | ~2 Go RAM, detection automatique |
-| LLM (cloud) | Llama 3.1 8B Instant via Groq | Cle API gratuite (GROQ_API_KEY) |
-| Recherche web | DuckDuckGo (ddgs) | Dernier recours si le LLM ne sait pas |
-| Memoire | InMemoryChatMessageHistory | Systematique (6 derniers messages toujours inclus) |
-| Interface | Streamlit | Chat web avec historique |
+| Routage | Code Python (regex, FAISS, pronoms) | LLM décide via tool calling |
+| LLM local | Qwen 2.5 3B via Ollama | — (cloud uniquement) |
+| LLM cloud | Llama 3.1 8B via Groq | Llama 4 Scout 17B via Groq |
+| Framework | LangChain (invoke) | LangGraph (create_react_agent) |
+| Outils | Fonctions internes | 5 outils @tool déclarés |
+| Embeddings | paraphrase-multilingual-mpnet-base-v2 (278M, 768 dim) | idem |
+| Vector store | FAISS (796 chunks) | idem |
+| Recherche web | DuckDuckGo (dernier recours) | idem |
+| Mémoire | 6 derniers messages systématiques | idem |
+| Interface | Streamlit | Streamlit (+ affichage des outils appelés) |
 
 ## Structure du projet
 
 ```
 RAG_project/
-├── requirements.txt                              # Dependances Python
+├── app.py                                        # Version déterministe (5 modes de routage)
+├── app_agent.py                                  # Version agent LangGraph (5 outils @tool)
+├── chatbot_ai_act.ipynb                          # Notebook version déterministe
+├── chatbot_agent.ipynb                           # Notebook version agent (annoté)
 ├── chunker.py                                    # Parsing structurel du AI Act (796 chunks)
 ├── build_index.py                                # Construction de l'index vectoriel FAISS
-├── app.py                                        # Application Streamlit (4 modes + memoire)
-├── chatbot_ai_act.ipynb                          # Notebook tout-en-un
 ├── OJ_L_202401689_FR_TXTavec annexes.md         # Texte source complet (articles + 13 annexes)
-├── faiss_index/                                  # Index FAISS (committe pour Streamlit Cloud)
+├── faiss_index/                                  # Index FAISS (committé pour Streamlit Cloud)
+├── requirements.txt                              # Dépendances Python
+├── DOCUMENTATION_TECHNIQUE.md                    # Documentation technique détaillée
+├── Presentation_Projet_RAG_v3.pptx              # Présentation PowerPoint
 ├── .gitignore
 └── .streamlit/
-    └── secrets.toml                              # Cle GROQ_API_KEY (non committe)
+    └── secrets.toml                              # Clé GROQ_API_KEY (non committée)
 ```
 
 ## Installation locale
@@ -47,142 +56,130 @@ pip install -r requirements.txt
 # Construire l'index (une seule fois)
 python build_index.py
 
-# Installer le modele LLM local
+# Installer le modèle LLM local (pour app.py uniquement)
 ollama pull qwen2.5:3b
 
-# Lancer
+# Lancer la version déterministe
 streamlit run app.py
+
+# Lancer la version agent
+streamlit run app_agent.py
 ```
 
-## Deploiement sur Streamlit Cloud
+## Déploiement sur Streamlit Cloud
 
 1. Poussez le code sur GitHub (incluant `faiss_index/` dans le repo)
-2. Connectez le repo a Streamlit Cloud
+2. Connectez le repo à Streamlit Cloud
 3. Ajoutez le secret `GROQ_API_KEY` :
    - Dashboard → Settings → Secrets
-   - `GROQ_API_KEY = "gsk_votre_cle_ici"`
-   - Cle gratuite sur : https://console.groq.com
-4. L'app detecte automatiquement l'absence d'Ollama et bascule sur Groq
+   - `GROQ_API_KEY = "gsk_votre_clé_ici"`
+   - Clé gratuite sur : https://console.groq.com
+4. Choisissez le **Main file path** :
+   - `app.py` pour la version déterministe
+   - `app_agent.py` pour la version agent
 
-## Detection automatique Local / Cloud
+## Les deux architectures
 
-```
-Demarrage de l'app
-    |
-    v
-Ollama repond sur localhost:11434 ?
-    |
-   oui → ChatOllama (Qwen 2.5 3B, local, gratuit)
-    |
-   non → ChatGroq (Llama 3.1 8B Instant, API Groq, gratuit)
-```
+### app.py — Routage déterministe
 
-## 4 modes automatiques
-
-Le routage est fait par du **code Python** (regex + score FAISS + detection de suivi), pas par le LLM.
-
-### Mode 1 — DIRECT (0 ou 1 appel LLM)
-
-Regex detecte un article, considerant ou annexe. Retourne le texte integral, ou le passe au LLM si un resume/explication est demande.
-
-```
-"Donne-moi l'article 5"        → texte integral (0 LLM)
-"Articles 5 et 8"              → texte des deux articles (0 LLM)
-"Articles 5 a 8"               → plage d'articles (0 LLM)
-"Considerants 1 et 2"          → texte des deux considerants (0 LLM)
-"Annexe III"                   → texte integral de l'annexe (0 LLM)
-"Resume l'article 5"           → texte passe au LLM pour synthese (1 LLM)
-"Explique le considerant 12"   → texte passe au LLM pour explication (1 LLM)
-```
-
-### Mode 2 — RAG (1 appel LLM)
-
-FAISS trouve des documents pertinents → le LLM redige avec le contexte.
-
-```
-"Je recrute par IA, conforme ?" → FAISS top-8 + LLM redige avec citations
-"Quelles sanctions ?"           → Article 99 + reponse structuree
-```
-
-### Mode 2bis — CONVERSATION (1 appel LLM, pas de recherche)
-
-Question de suivi detectee (pronoms, verbes d'action, phrase courte). Le LLM repond avec l'historique seul, sans polluer avec DuckDuckGo.
-
-```
-"Etait-il un grand peintre ?"  → utilise l'historique (pas de web)
-"Resume le"                    → resume le dernier contenu discute
-"Comment je m'appelle ?"       → retrouve le prenom dans l'historique
-"Repete la blague"             → utilise l'historique
-```
-
-### Mode 3 — LLM SEUL (1 appel LLM)
-
-Ni le RAG ni la conversation ne donnent de resultat. Le LLM repond avec ses propres connaissances. S'il ne sait pas, il emet le marqueur `[RECHERCHE_WEB]` qui declenche le mode 4.
-
-```
-"Qui est Emmanuel Macron ?"    → reponse directe du LLM
-"Raconte une blague de Toto"   → reponse directe du LLM
-```
-
-### Mode 4 — WEB (1 appel LLM)
-
-Declenche uniquement si le LLM a repondu `[RECHERCHE_WEB]` (il ne sait pas). DuckDuckGo (FR + EN) + LLM redige.
-
-```
-"Qui a gagne Paris-Roubaix ?"  → LLM ne sait pas → DuckDuckGo → reponse
-```
-
-## Memoire conversationnelle
-
-`InMemoryChatMessageHistory` (LangChain natif). Les 6 derniers messages sont **toujours** envoyes au LLM.
-
-La detection de suivi conversationnel utilise 2 signaux :
-- **Pronoms/references** : il, elle, son, sa, ce, cette, quel, sur quel, a-t-il, est-elle, ci-dessus, ta reponse...
-- **Verbes d'action en debut de phrase** : resume, explique, detaille, continue, repete, redis...
-
-Cela evite que "etait-il un peintre aussi ?" parte sur DuckDuckGo et retourne un resultat sans rapport.
-
-## Architecture
+Le routage est fait par du **code Python** (regex + score FAISS + détection de pronoms), pas par le LLM.
 
 ```
 Question
-    |
-    v
-1. Regex article/considerant/annexe ?
-   oui → docstore_lookup → texte integral (0 LLM)
-    |                       ou synthese LLM si resume demande (1 LLM)
-    v
-2. FAISS (score > 0.35) ?
+    │
+    ▼
+① Regex article/considérant/annexe ?
+   oui → docstore_lookup → texte intégral (0 LLM)
+    │                       ou synthèse LLM si résumé demandé
+    ▼
+② FAISS (score > 0.35) ?
    oui → contexte AI Act + historique → LLM (1 appel)
-    |
-    v
-3. Question de suivi ? (pronoms + phrase courte, OU verbe d'action)
+    │
+    ▼
+③ Question de suivi ? (pronoms + phrase courte, ou verbe d'action)
    oui → LLM + historique seul (0 recherche)
-    |
-    v
-4. LLM repond avec ses connaissances propres
-   → Si [RECHERCHE_WEB] → DuckDuckGo (FR + EN) → LLM (1 appel)
-   → Sinon → reponse directe
+    │
+    ▼
+④ LLM répond avec ses connaissances propres
+   → Si [RECHERCHE_WEB] → DuckDuckGo → LLM
+   → Sinon → réponse directe
 ```
 
-## Donnees indexees
+### app_agent.py — Agent LangGraph
+
+Le **LLM décide lui-même** quel outil appeler via le mécanisme de tool calling.
+
+```
+Question
+    │
+    ▼
+Agent LangGraph (create_react_agent)
+Le LLM reçoit 5 outils et décide :
+    │
+    ├── recherche_article("5")        → docstore_lookup → texte intégral
+    ├── recherche_considerant("12")   → docstore_lookup → texte intégral
+    ├── recherche_annexe("III")       → docstore_lookup → texte intégral
+    ├── recherche_ia_act("obligations")→ FAISS retriever → chunks pertinents
+    └── recherche_web("actualité")    → DuckDuckGo (dernier recours)
+    │
+    ▼
+Réponse rédigée par le LLM
+```
+
+**5 outils déclarés avec `@tool` :**
+
+```python
+@tool
+def recherche_article(article_num: str) -> str:
+    """Recherche le texte intégral d'un article du AI Act par son numéro."""
+    docs = docstore_lookup(db, {"article": article_num})
+    return format_docs(docs)
+```
+
+Le LLM lit les **docstrings** pour décider quand appeler chaque outil.
+
+## Comparaison des deux approches
+
+| Critère | app.py (déterministe) | app_agent.py (agent) |
+|---|---|---|
+| Prédictibilité | Même question → même mode, toujours | Peut varier selon le contexte |
+| Rapidité | Regex + FAISS = millisecondes | Plusieurs appels LLM (plus lent) |
+| Coût en tokens | 0 token pour le routage | ~500 tokens par décision |
+| Déboguabilité | Mode affiché (Direct/RAG/Web) | Outils appelés affichés |
+| Multi-articles | Regex "articles 5 et 8" | L'agent appelle l'outil 2 fois |
+| Résumé | Regex wants_analysis | L'agent résume naturellement |
+| Flexibilité | Limitée aux regex prédéfinies | Le LLM s'adapte à toute formulation |
+| LLM requis | Fonctionne avec 3B (routage par code) | Nécessite ≥ 8B (tool calling fiable) |
+
+## Mémoire conversationnelle
+
+`InMemoryChatMessageHistory` (LangChain natif). Les 6 derniers messages sont **toujours** envoyés au LLM dans les deux versions.
+
+**app.py** ajoute une détection de suivi conversationnel (pronoms + verbes d'action) pour éviter les recherches web parasites.
+
+**app_agent.py** laisse l'agent gérer naturellement les questions de suivi grâce à l'historique envoyé dans les messages.
+
+## Données indexées
 
 | Type | Nombre | Source |
 |---|---|---|
-| Considerants | 236 | (1) a (180+) |
-| Articles | 465 | Article premier a Article 113 (decoupes par paragraphe) |
-| Annexes | 95 | Annexe I a XIII (13 annexes, decoupees par section) |
+| Considérants | 236 | (1) à (180+) |
+| Articles | 465 | Article premier à Article 113 (découpés par paragraphe) |
+| Annexes | 95 | Annexe I à XIII (13 annexes, découpées par section) |
 | **Total** | **796 chunks** | |
 
 ## Configuration
 
-| Parametre | Defaut | Description |
-|---|---|---|
-| `OLLAMA_MODEL` | `"qwen2.5:3b"` | Modele local (Ollama) |
-| `GROQ_MODEL` | `"llama-3.1-8b-instant"` | Modele cloud (Groq) |
-| `SCORE_THRESHOLD` | `0.35` | Seuil de pertinence FAISS |
-| `TOP_K` | `8` | Nombre max de documents en mode RAG |
+| Paramètre | app.py | app_agent.py | Description |
+|---|---|---|---|
+| `OLLAMA_MODEL` | `qwen2.5:3b` | — | Modèle local |
+| `GROQ_MODEL` | `llama-3.1-8b-instant` | `llama-4-scout-17b-16e-instruct` | Modèle cloud |
+| `SCORE_THRESHOLD` | `0.35` | `0.35` | Seuil de pertinence FAISS |
+| `TOP_K` | `8` | `8` | Nombre max de documents RAG |
+
+**Pourquoi Llama 4 Scout pour l'agent ?**
+L'agent fait plusieurs appels LLM par question. Llama 3.1 8B a un quota de 6K tokens/min → dépassé en 2-3 questions. Llama 4 Scout 17B a **30K tokens/min** (5× plus), suffisant pour un agent.
 
 ## Licence
 
-Le texte du Reglement (UE) 2024/1689 est un document officiel de l'Union europeenne accessible sur [EUR-Lex](https://eur-lex.europa.eu/legal-content/FR/TXT/HTML/?uri=OJ:L_202401689).
+Le texte du Règlement (UE) 2024/1689 est un document officiel de l'Union européenne accessible sur [EUR-Lex](https://eur-lex.europa.eu/legal-content/FR/TXT/HTML/?uri=OJ:L_202401689).
